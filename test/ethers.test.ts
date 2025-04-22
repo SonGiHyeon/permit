@@ -1,4 +1,3 @@
-import { expect } from 'chai';
 import {
   ownerBalance,
   owner,
@@ -8,8 +7,13 @@ import {
   getAllowance,
   permit,
   tranferFrom,
+  contractByOwner,
+  contractBySpender,
+  provider,
 } from '../utils/ethers';
 import { ethers } from 'hardhat';
+import { expect } from 'chai';
+
 
 describe('ethers 구현 테스트', function () {
   it('getBalance는 인자로 받는 address의 잔액을 리턴해야 합니다.(balanceOf)', async function () {
@@ -53,4 +57,82 @@ describe('ethers 구현 테스트', function () {
     );
     expect(prevOwnerbalance).to.equal(afterOwnerbalance);
   });
-});
+
+  // B -> C한데 토큰을 보내는데 B는 가스비를 소비하지 않고 A가 대신 가스를 납부헤야 됨(gasLess)
+  it('permit 함수를 이용해서 spender와 owner, value가 정해지면, transferFrom 함수를 이용해서 owner(from)에서 receiver(to)로 value를 보내야 한다.(단, spender의 balance만 감소해야 한다.)', async function () {
+    const value = ethers.parseEther('10');
+
+    // 준비: permit 서명 정보
+    const nonce = await contractByOwner.nonces(owner.address);
+    const deadline = Math.floor(Date.now() / 1000) + 3600;
+    const chainId = (await provider.getNetwork()).chainId;
+    const name = await contractByOwner.name();
+
+    const domain = {
+      name,
+      version: '1',
+      chainId,
+      verifyingContract: contractByOwner.target.toString(),
+    };
+
+    const types = {
+      Permit: [
+        { name: 'owner', type: 'address' },
+        { name: 'spender', type: 'address' },
+        { name: 'value', type: 'uint256' },
+        { name: 'nonce', type: 'uint256' },
+        { name: 'deadline', type: 'uint256' },
+      ],
+    };
+
+    const message = {
+      owner: owner.address,
+      spender: spender.address,
+      value,
+      nonce,
+      deadline,
+    };
+
+    const signature = await owner.signTypedData(domain, types, message);
+    const { v, r, s } = ethers.Signature.from(signature);
+
+    // ✅ 잔액 확인 전
+    const ownerTokenBefore = await contractByOwner.balanceOf(owner.address);
+    const recipientTokenBefore = await contractByOwner.balanceOf(recipient.address);
+    const spenderEthBefore = await provider.getBalance(spender.address);
+
+    // spender가 permit 실행
+    const permitTx = await contractBySpender.permit(
+      owner.address,
+      spender.address,
+      value,
+      deadline,
+      v,
+      r,
+      s
+    );
+    await permitTx.wait();
+
+    // spender가 transferFrom 실행
+    const tx = await contractBySpender.transferFrom(
+      owner.address,
+      recipient.address,
+      value
+    );
+    const receipt = await tx.wait();
+
+    // ✅ 잔액 확인 후
+    const ownerTokenAfter = await contractByOwner.balanceOf(owner.address);
+    const recipientTokenAfter = await contractByOwner.balanceOf(recipient.address);
+    const spenderEthAfter = await provider.getBalance(spender.address);
+
+    // ✅ 토큰 이동 확인
+    expect(ownerTokenAfter).to.equal(ownerTokenBefore - value);
+    expect(recipientTokenAfter).to.equal(recipientTokenBefore + value);
+
+    // ✅ spender가 ETH로 가스를 낸 것 확인 (잔액이 줄었는지)
+    expect(spenderEthAfter).to.be.lt(spenderEthBefore); // ETH 잔액이 줄어야 함
+
+    console.log('Spender used ETH for gas:', ethers.formatEther(spenderEthBefore - spenderEthAfter));
+  });
+})
